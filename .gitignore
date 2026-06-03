@@ -1,0 +1,9 @@
+build/
+install/
+log/
+data/*.csv
+data/*.md
+data/*.png
+__pycache__/
+*.py[cod]
+
