@@ -228,13 +228,6 @@ Step response:
 
 ![Step response plot](data/testbench_1780518665151713785.png)
 
-Backlash/reversal:
-
-![Backlash test plot](data/testbench_1780518689950319684.png)
-
-Friction sweep:
-
-![Friction sweep plot](data/testbench_1780518715344103413.png)
 
 Example report generation:
 
