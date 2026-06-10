@@ -23,7 +23,12 @@ from tendon_finger_testbench.ros_helpers import (
 )
 
 
+TEST_MODES = {"step", "backlash", "friction", "sine", "chirp", "load", "thermal"}
+
+
 class TestExecutorNode(Node):
+    __test__ = False
+
     def __init__(self) -> None:
         super().__init__("test_executor_node")
         declare_parameters(self, TEST_DEFAULTS)
@@ -59,16 +64,38 @@ class TestExecutorNode(Node):
         return SetParametersResult(successful=True)
 
     def _start_test(self, mode: str) -> None:
+        mode = mode.lower()
+        if mode not in TEST_MODES:
+            self.get_logger().warn(f"Ignoring unknown test mode: {mode}")
+            return
+        duplicate_topics = [
+            topic
+            for topic in (
+                "/finger/sensor_state",
+                "/finger/controller_state",
+            )
+            if self.count_publishers(topic) > 1
+        ]
+        if duplicate_topics:
+            self.get_logger().error(
+                "Refusing to start test because duplicate testbench publishers "
+                f"were detected on: {', '.join(duplicate_topics)}. Stop the other "
+                "launch before starting a test."
+            )
+            return
         self.params["mode"] = mode
         self.running = True
         self.started_at = self._now_s()
         self.samples.clear()
-        self._publish_test_command({"reset": True, "external_load": 0.0})
+        self._publish_test_command(
+            {"reset": True, "reset_controller": True, "external_load": 0.0}
+        )
         self.get_logger().info(f"Starting {mode} test.")
 
     def _stop_test(self) -> None:
         mode = str(self.params["mode"])
         self.running = False
+        self._publish_float(self.position_pub, 0.0)
         self._publish_float(self.velocity_pub, 0.0)
         if mode == "load":
             self._publish_test_command({"external_load": 0.0})
@@ -83,7 +110,10 @@ class TestExecutorNode(Node):
         if "start_test" in payload:
             self._start_test(str(payload["start_test"]))
         if payload.get("stop_test"):
-            self._stop_test()
+            if self.running:
+                self._stop_test()
+            else:
+                self.get_logger().info("Ignoring stop_test command; no test is running.")
 
     def _sensor_callback(self, msg: JointState) -> None:
         self.latest_sensor = {
@@ -100,8 +130,13 @@ class TestExecutorNode(Node):
         self.latest_true = {
             "true_motor_position": joint_value(msg, "motor_shaft", "position", 0.0),
             "true_motor_velocity": joint_value(msg, "motor_shaft", "velocity", 0.0),
+            "true_spool_position": joint_value(msg, "spool_output", "position", 0.0),
+            "true_spool_velocity": joint_value(msg, "spool_output", "velocity", 0.0),
             "true_finger_position": joint_value(msg, "finger_joint", "position", 0.0),
             "true_finger_velocity": joint_value(msg, "finger_joint", "velocity", 0.0),
+            "tendon_length": joint_value(msg, "drive_tendon", "position", 0.0),
+            "tendon_velocity": joint_value(msg, "drive_tendon", "velocity", 0.0),
+            "visual_cable_length": joint_value(msg, "cable_path", "position", 0.0),
             "applied_torque_after_saturation": joint_value(msg, "motor_shaft", "effort", 0.0),
         }
 
@@ -172,8 +207,8 @@ class TestExecutorNode(Node):
             f1 = float(self.params["chirp.end_frequency_hz"])
             k = (f1 - f0) / duration
             phase = 2.0 * math.pi * (f0 * active_t + 0.5 * k * active_t * active_t)
-            amplitude = float(self.params["sine.amplitude_rad"])
-            bias = float(self.params["sine.bias_rad"])
+            amplitude = float(self.params["chirp.amplitude_rad"])
+            bias = float(self.params["chirp.bias_rad"])
             return bias + amplitude * math.sin(phase)
 
         if mode == "load":
@@ -246,7 +281,12 @@ class TestExecutorNode(Node):
         t90 = self._crossing_time(values, start_value + 0.9 * amplitude)
         rise = float("nan") if t10 is None or t90 is None else t90 - t10
         peak = max(position for _, position in values) if amplitude > 0.0 else min(position for _, position in values)
-        overshoot = (peak - target) / abs(amplitude) * 100.0 if amplitude > 0.0 else (target - peak) / abs(amplitude) * 100.0
+        overshoot = max(
+            0.0,
+            (peak - target) / abs(amplitude) * 100.0
+            if amplitude > 0.0
+            else (target - peak) / abs(amplitude) * 100.0,
+        )
         steady_error = target - final_value
         peak_torque = max(abs(s.get("torque_command", 0.0)) for s in self.samples)
         peak_current = max(abs(s.get("current_command", 0.0)) for s in self.samples)

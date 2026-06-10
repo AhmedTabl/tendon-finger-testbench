@@ -29,10 +29,15 @@ CSV_COLUMNS = [
     "command_torque_or_current",
     "true_motor_position",
     "true_motor_velocity",
+    "true_spool_position",
+    "true_spool_velocity",
     "measured_motor_encoder_position",
     "true_finger_position",
     "true_finger_velocity",
     "measured_output_position",
+    "tendon_length",
+    "tendon_velocity",
+    "visual_cable_length",
     "cable_tension",
     "controller_error_position",
     "controller_error_velocity",
@@ -92,8 +97,23 @@ class DataLoggerNode(Node):
     def _true_state(self, msg: JointState) -> None:
         self.values["true_motor_position"] = joint_value(msg, "motor_shaft", "position", 0.0)
         self.values["true_motor_velocity"] = joint_value(msg, "motor_shaft", "velocity", 0.0)
+        self.values["true_spool_position"] = joint_value(
+            msg, "spool_output", "position", 0.0
+        )
+        self.values["true_spool_velocity"] = joint_value(
+            msg, "spool_output", "velocity", 0.0
+        )
         self.values["true_finger_position"] = joint_value(msg, "finger_joint", "position", 0.0)
         self.values["true_finger_velocity"] = joint_value(msg, "finger_joint", "velocity", 0.0)
+        self.values["tendon_length"] = joint_value(
+            msg, "drive_tendon", "position", 0.0
+        )
+        self.values["tendon_velocity"] = joint_value(
+            msg, "drive_tendon", "velocity", 0.0
+        )
+        self.values["visual_cable_length"] = joint_value(
+            msg, "cable_path", "position", 0.0
+        )
         self.values["applied_torque_after_saturation"] = joint_value(
             msg, "motor_shaft", "effort", 0.0
         )
@@ -155,4 +175,3 @@ def main(args: Any = None) -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -50,10 +50,13 @@ def compute_step_metrics(
     rise_time = t90 - t10 if math.isfinite(t10) and math.isfinite(t90) else float("nan")
 
     peak = max(finite_signal) if amplitude > 0.0 else min(finite_signal)
-    overshoot = (
-        (peak - target) / abs(amplitude) * 100.0
-        if amplitude > 0.0
-        else (target - peak) / abs(amplitude) * 100.0
+    overshoot = max(
+        0.0,
+        (
+            (peak - target) / abs(amplitude) * 100.0
+            if amplitude > 0.0
+            else (target - peak) / abs(amplitude) * 100.0
+        ),
     )
 
     tolerance = max(abs(amplitude) * settling_band, 1.0e-4)
@@ -97,4 +100,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -30,6 +30,7 @@ setup(
             "plant_sim_node = tendon_finger_testbench.plant_sim_node:main",
             "controller_node = tendon_finger_testbench.controller_node:main",
             "command_cli_node = tendon_finger_testbench.command_cli_node:main",
+            "parameter_gui_node = tendon_finger_testbench.parameter_gui_node:main",
             "test_executor_node = tendon_finger_testbench.test_executor_node:main",
             "data_logger_node = tendon_finger_testbench.data_logger_node:main",
             "plot_test = tendon_finger_testbench.analysis.plot_test:main",
@@ -40,4 +41,3 @@ setup(
         ],
     },
 )
-

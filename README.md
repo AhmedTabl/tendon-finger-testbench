@@ -8,11 +8,12 @@ when a motor, pulley, cable, encoder, controller, and compliant finger all meet
 each other: friction, backlash, tendon slack, stiffness, delay, saturation,
 thermal limits, noisy sensors, and closed-loop tuning.
 
-The first pass is intentionally Python-first and readable. The plant model is
-implemented in Python for clarity, while MuJoCo provides a visual physics scene
-with a base, motor/spool, cable path, and single revolute finger link. The
-architecture is meant to make the simulated plant replaceable later with a real
-motor driver and encoder hardware interface.
+MuJoCo is the authoritative mechanical plant. It simulates the motor shaft,
+editable gearbox, cable spool, compliant unilateral tendon, guide pulley, and
+single rigid finger link. Python provides the ROS interface, actuator lag,
+thermal state, delayed/noisy sensor models, safety handling, and test tools.
+The architecture keeps the simulated plant replaceable later with a real motor
+driver and encoder hardware interface.
 
 ## What You Can Do With It
 
@@ -64,9 +65,9 @@ tendon_finger_testbench_ws/
                       | /finger/command_torque
                       v
           +-------------------------+
-          | Python plant model      |
-          | motor/spool/tendon      |
-          | finger/sensors/safety   |
+          | MuJoCo mechanical plant |
+          | shaft/gearbox/spool     |
+          | tendon/finger dynamics  |
           +-----------+-------------+
                       |
        +--------------+---------------+
@@ -77,29 +78,30 @@ tendon_finger_testbench_ws/
                               /finger/output_sensor
 ```
 
-MuJoCo is loaded by `plant_sim_node` when available. In this first pass, the
-Python plant is authoritative for tendon transmission, backlash, slack, thermal
-state, sensor effects, and safety limits. MuJoCo is used for the model scene and
-viewer, and can be expanded later for deeper physics coupling.
+`plant_sim_node` advances MuJoCo at 500 Hz and reads the motor, spool, tendon,
+and finger state directly from it. The motor-shaft encoder and finger output
+sensor are independently configurable. Setting `mujoco.enable:=false` retains
+the original Python plant as a headless compatibility fallback.
 
 ## Dynamics Model
 
-The plant is built around the familiar single-axis form:
+Each revolute axis follows the familiar rigid-body form:
 
 ```text
 J*q_ddot + b*q_dot + tau_c*sgn(q_dot) + k*q
     = tau_motor_effective - tau_load
 ```
 
-The model splits this idea across the motor side and finger side:
+The model splits this idea across the motor, spool, tendon, and finger:
 
-- Motor side: inertia, viscous damping, Coulomb friction, static friction,
-  torque constant, current/torque saturation, actuator lag, and optional
-  stiffness.
-- Transmission: motor angle maps to spool angle using `gear_ratio`; spool angle
-  maps to tendon displacement through `spool_radius`.
-- Tendon: tendon stretch is created only after slack is taken up, then cable
-  tension is computed from tendon stiffness and damping.
+- Motor shaft: inertia, damping, friction, torque/current saturation, actuator
+  lag, and a visible shaft encoder disc.
+- Gearbox and spool: an editable equality constraint enforces
+  `spool_angle = motor_angle / gear_ratio`; spool inertia, damping, friction,
+  and radius are independently editable.
+- Tendon: a MuJoCo fixed tendon maps spool and finger rotation into cable
+  extension. Its spring range makes it unilateral, so it pulls but never
+  pushes. A separate spatial tendon renders the moving cable around the guide.
 - Finger side: link inertia, damping, Coulomb/static friction, joint stiffness,
   gravity torque, external load torque, and hard stops.
 
@@ -109,16 +111,15 @@ Tendon displacement mapping:
 spool_angle = motor_angle / gear_ratio
 tendon_drive_displacement = spool_angle * spool_radius
 finger_tendon_displacement = finger_angle * tendon_moment_arm
-stretch = tendon_drive_displacement - finger_tendon_displacement - slack
+effective_slack = slack
+    + output_deadband_mm * 0.001 * tendon_moment_arm / finger_length
+stretch = tendon_drive_displacement
+    - finger_tendon_displacement - effective_slack
 tension = max(0, stiffness*stretch + damping*stretch_rate)
 ```
 
-Output-side backlash can be configured in millimeters and is converted to an
-angular deadband using the finger length:
-
-```text
-output_backlash_rad = output_deadband_mm * 0.001 / finger_length_m
-```
+Motor-side deadband changes the gearbox constraint compliance. Output-side
+deadband adds cable take-up distance before tendon force develops.
 
 ## Requirements
 
@@ -144,16 +145,18 @@ colcon build --symlink-install
 source install/setup.bash
 ```
 
-Launch the simulation headless:
+Launch the simulation. By default this opens the MuJoCo viewer, starts the
+Python control GUI, launches the controller/logger, and keeps the test executor
+ready but idle:
 
 ```bash
 ros2 launch tendon_finger_testbench sim.launch.py
 ```
 
-Launch with the MuJoCo viewer:
+Launch headless:
 
 ```bash
-ros2 launch tendon_finger_testbench sim.launch.py mujoco_viewer:=true
+ros2 launch tendon_finger_testbench sim.launch.py mujoco_viewer:=false use_gui:=false
 ```
 
 Launch with the command-line interface:
@@ -184,13 +187,29 @@ load 0.05    apply external load torque in N m
 reset        reset the simulated plant
 ```
 
+## Python Control GUI
+
+The `parameter_gui_node` launches by default with `sim.launch.py`. It provides:
+
+- test selection plus start, stop, and plant reset controls
+- per-test parameters for step, backlash, friction, sine, chirp, load, and
+  thermal profiles
+- shared motor/actuator, finger, tendon, transmission, backlash, sensor, delay,
+  safety, thermal, and controller tuning tabs
+- manual position, velocity, and direct torque command publishing
+
+Disable it with:
+
+```bash
+ros2 launch tendon_finger_testbench sim.launch.py use_gui:=false
+```
+
 ## Automated Tests
 
 Run a step response test:
 
 ```bash
 ros2 launch tendon_finger_testbench sim.launch.py \
-  use_test_executor:=true \
   auto_start_test:=true \
   test_mode:=step
 ```
@@ -199,8 +218,6 @@ Run with the viewer open:
 
 ```bash
 ros2 launch tendon_finger_testbench sim.launch.py \
-  mujoco_viewer:=true \
-  use_test_executor:=true \
   auto_start_test:=true \
   test_mode:=backlash
 ```
@@ -268,6 +285,9 @@ src/tendon_finger_testbench/config/default_params.yaml
 
 Good parameters to tune live:
 
+- the shared motor/actuator values in the GUI Motor tab
+- `plant_sim_node.transmission.gear_ratio`
+- `plant_sim_node.transmission.spool_*`
 - `controller_node.position.*`
 - `controller_node.velocity.*`
 - `plant_sim_node.tendon.stiffness_n_per_m`
@@ -286,8 +306,9 @@ ros2 param set /plant_sim_node backlash.motor_deadband_rad 0.04
 ros2 param set /plant_sim_node tendon.stiffness_n_per_m 1200.0
 ```
 
-Restart is recommended after changing update rates, MuJoCo viewer settings,
-major inertial values, or model topology.
+Restart is recommended only after changing update rates, MuJoCo viewer
+settings, the XML path, or model topology. Mechanical dimensions, inertias,
+gear ratio, tendon properties, sensors, and controller values update live.
 
 ## Safety Behavior
 
@@ -304,10 +325,12 @@ Safety status is published on `/finger/safety_status`.
 
 ## Known Limitations
 
-- The tendon model is transparent and tunable, not a detailed cable contact
-  solver.
-- The MuJoCo model is currently used for visualization/scene loading while the
-  Python plant owns the actuator dynamics.
+- The custom geometry represents a generic 42 mm-class geared motor and
+  simplified test fixture, not a dimensionally exact commercial part.
+- The cable uses an ideal compliant tendon plus a visual pulley route, not a
+  finite-element cable or strand/contact solver.
+- Static friction uses a tunable low-speed Stribeck approximation; its defaults
+  are generic rather than fitted to a measured actuator.
 - Standard ROS messages are used to keep the first pass simple, so named
   `JointState` fields carry several scalar diagnostics.
 - Direct torque mode and closed-loop mode both publish/consume
@@ -320,8 +343,18 @@ Safety status is published on `/finger/safety_status`.
 
 - Add a `ros2_control` hardware interface for real motor driver and encoder IO.
 - Add custom messages once the state schema stabilizes.
-- Move more rigid-body and actuator coupling into MuJoCo.
 - Add encoder zeroing, tendon pretension, and joint-limit calibration routines.
 - Extend the model to multi-link fingers and coupled tendon routing.
 - Add richer frequency-response analysis for sine and chirp tests.
 
+## Model References
+
+No external mesh or CAD file is copied into this repository. The custom MJCF
+uses MuJoCo primitives so its dimensions remain editable from ROS. Its modeling
+approach was informed by:
+
+- [MuJoCo Modeling Guide](https://mujoco.readthedocs.io/en/stable/modeling.html)
+- [MuJoCo XML Reference](https://mujoco.readthedocs.io/en/stable/XMLreference.html)
+- [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie)
+- [Yale OpenHand hardware](https://github.com/grablab/openhand-hardware)
+- [Tactile SoftHand-A CAD](https://github.com/HaoranLi-Data/Tactile_SoftHand_A)

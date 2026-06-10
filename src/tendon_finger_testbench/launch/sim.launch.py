@@ -19,6 +19,7 @@ def generate_launch_description() -> LaunchDescription:
 
     params_file = LaunchConfiguration("params_file")
     use_cli = LaunchConfiguration("use_cli")
+    use_gui = LaunchConfiguration("use_gui")
     use_logger = LaunchConfiguration("use_logger")
     use_test_executor = LaunchConfiguration("use_test_executor")
     test_mode = LaunchConfiguration("test_mode")
@@ -38,13 +39,18 @@ def generate_launch_description() -> LaunchDescription:
                 description="Launch the terminal command CLI.",
             ),
             DeclareLaunchArgument(
+                "use_gui",
+                default_value="true",
+                description="Launch the Python parameter/test control GUI.",
+            ),
+            DeclareLaunchArgument(
                 "use_logger",
                 default_value="true",
                 description="Launch the CSV data logger.",
             ),
             DeclareLaunchArgument(
                 "use_test_executor",
-                default_value="false",
+                default_value="true",
                 description="Launch automated test executor.",
             ),
             DeclareLaunchArgument(
@@ -59,7 +65,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "mujoco_viewer",
-                default_value="false",
+                default_value="true",
                 description="Open MuJoCo passive viewer if mujoco is installed.",
             ),
             Node(
@@ -111,6 +117,12 @@ def generate_launch_description() -> LaunchDescription:
                 condition=IfCondition(use_cli),
                 parameters=[params_file],
             ),
+            Node(
+                package="tendon_finger_testbench",
+                executable="parameter_gui_node",
+                name="parameter_gui_node",
+                output="screen",
+                condition=IfCondition(use_gui),
+            ),
         ]
     )
-

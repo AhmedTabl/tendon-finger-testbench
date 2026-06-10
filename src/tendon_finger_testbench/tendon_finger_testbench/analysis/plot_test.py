@@ -22,6 +22,7 @@ def plot(csv_path: str, output: str | None = None) -> str | None:
     axes[0].legend()
 
     axes[1].plot(time, series(rows, "true_motor_velocity"), label="motor")
+    axes[1].plot(time, series(rows, "true_spool_velocity"), label="spool")
     axes[1].plot(time, series(rows, "true_finger_velocity"), label="finger")
     axes[1].set_ylabel("velocity [rad/s]")
     axes[1].legend()
@@ -65,4 +66,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

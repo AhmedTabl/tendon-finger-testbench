@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any, Dict, Optional
 
@@ -9,7 +10,7 @@ from rcl_interfaces.msg import SetParametersResult
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, String
 
 from tendon_finger_testbench.defaults import CONTROLLER_DEFAULTS
 from tendon_finger_testbench.model import PID, clamp
@@ -54,11 +55,13 @@ class ControllerNode(Node):
         self.create_subscription(Float64, "/finger/command_position", self._position_callback, 10)
         self.create_subscription(Float64, "/finger/command_velocity", self._velocity_callback, 10)
         self.create_subscription(JointState, "/finger/sensor_state", self._sensor_callback, 10)
+        self.create_subscription(String, "/finger/test_command", self._test_command_callback, 10)
 
         self.add_on_set_parameters_callback(self._on_parameters)
 
         self.update_rate_hz = max(float(self.params["update_rate_hz"]), 1.0)
         self.dt = 1.0 / self.update_rate_hz
+        self.last_update_time = self.get_clock().now()
         self.timer = self.create_timer(self.dt, self._timer_callback)
         self.get_logger().info(f"Cascaded controller running at {self.update_rate_hz:.1f} Hz.")
 
@@ -87,10 +90,26 @@ class ControllerNode(Node):
             kt * abs(float(self.params["safety.max_current_a"])),
         )
 
+    def _minimum_torque_limit(self, torque_limit: Optional[float] = None) -> float:
+        if torque_limit is None:
+            torque_limit = self._effective_torque_limit()
+        return clamp(
+            float(self.params["velocity.minimum_torque_nm"]),
+            -torque_limit,
+            torque_limit,
+        )
+
     def _on_parameters(self, parameters: Any) -> SetParametersResult:
         updates = parameters_to_dict(parameters)
         self.params.update(updates)
         self._configure_pids()
+        if any(
+            name.startswith("position.") or name.startswith("velocity.")
+            for name in updates
+        ):
+            self.position_pid.reset()
+            self.velocity_pid.reset()
+            self.last_velocity_command = 0.0
         if "target_position_rad" in updates:
             self.target_position = float(updates["target_position_rad"])
         if "target_velocity_rad_s" in updates:
@@ -104,6 +123,22 @@ class ControllerNode(Node):
 
     def _velocity_callback(self, msg: Float64) -> None:
         self.target_velocity = msg.data
+
+    def _test_command_callback(self, msg: String) -> None:
+        try:
+            command = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        if command.get("reset") or command.get("reset_controller"):
+            self.position_pid.reset()
+            self.velocity_pid.reset()
+            self.target_position = 0.0
+            self.target_velocity = 0.0
+            self.last_velocity_command = 0.0
+            self.last_update_time = self.get_clock().now()
+            self.torque_command = 0.0
+            self.current_command = 0.0
+            self.get_logger().info("Controller state reset from /finger/test_command.")
 
     def _sensor_callback(self, msg: JointState) -> None:
         self.motor_encoder_position = joint_value(msg, "motor_encoder", "position", 0.0)
@@ -142,7 +177,10 @@ class ControllerNode(Node):
         return finger_torque * spool_radius / (gear * moment_arm)
 
     def _timer_callback(self) -> None:
-        dt = self.dt
+        now = self.get_clock().now()
+        elapsed = (now - self.last_update_time).nanoseconds * 1.0e-9
+        self.last_update_time = now
+        dt = clamp(elapsed, 0.25 * self.dt, 4.0 * self.dt)
 
         self.position_error = self.target_position - self.feedback_position
         velocity_from_position = self.position_pid.update(self.position_error, dt)
@@ -153,36 +191,58 @@ class ControllerNode(Node):
             velocity_limit,
         )
 
-        self.velocity_error = velocity_command - self.feedback_velocity
-        torque_command = self.velocity_pid.update(self.velocity_error, dt)
-
         acceleration_command = (velocity_command - self.last_velocity_command) / dt
         self.last_velocity_command = velocity_command
 
-        torque_command += float(self.params["feedforward.velocity_gain_nm_per_rad_s"]) * velocity_command
-        torque_command += (
+        feedforward_torque = (
+            float(self.params["feedforward.velocity_gain_nm_per_rad_s"])
+            * velocity_command
+        )
+        feedforward_torque += (
             float(self.params["feedforward.acceleration_gain_nm_per_rad_s2"])
             * acceleration_command
         )
 
         if bool(self.params["feedforward.gravity_compensation"]):
-            finger_gravity = (
+            finger_hold_torque = (
                 float(self.params["model.finger_mass_kg"])
                 * 9.80665
                 * float(self.params["model.finger_com_length_m"])
                 * math.sin(self.feedback_position)
             )
-            torque_command += self._finger_torque_to_motor_torque(finger_gravity)
+            feedforward_torque += self._finger_torque_to_motor_torque(
+                finger_hold_torque
+            )
+
+        if bool(self.params["feedforward.joint_stiffness_compensation"]):
+            finger_spring_torque = (
+                float(self.params["model.finger_joint_stiffness_nm_per_rad"])
+                * self.feedback_position
+            )
+            feedforward_torque += self._finger_torque_to_motor_torque(
+                finger_spring_torque
+            )
 
         if bool(self.params["feedforward.friction_compensation"]):
             friction = float(self.params["model.finger_coulomb_friction_nm"])
             if abs(velocity_command) > 1.0e-4:
-                torque_command += self._finger_torque_to_motor_torque(
+                feedforward_torque += self._finger_torque_to_motor_torque(
                     friction * math.copysign(1.0, velocity_command)
                 )
 
         torque_limit = self._effective_torque_limit()
-        torque_command = clamp(torque_command, -torque_limit, torque_limit)
+        minimum_torque = self._minimum_torque_limit(torque_limit)
+        self.velocity_pid.set_output_bounds(
+            minimum_torque - feedforward_torque,
+            torque_limit - feedforward_torque,
+        )
+        self.velocity_error = velocity_command - self.feedback_velocity
+        correction_torque = self.velocity_pid.update(self.velocity_error, dt)
+        torque_command = clamp(
+            correction_torque + feedforward_torque,
+            minimum_torque,
+            torque_limit,
+        )
         kt = max(float(self.params["motor.torque_constant_nm_per_a"]), 1.0e-9)
         self.torque_command = torque_command
         self.current_command = torque_command / kt
@@ -250,4 +310,3 @@ def main(args: Any = None) -> None:
 
 if __name__ == "__main__":
     main()
-

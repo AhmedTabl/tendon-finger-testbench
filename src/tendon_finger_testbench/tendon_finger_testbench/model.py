@@ -1,9 +1,8 @@
-"""Shared dynamics, filtering, and controller utilities.
+"""Shared filtering, fallback dynamics, and controller utilities.
 
-The first-pass plant intentionally keeps the tendon transmission in Python so
-it is easy to inspect and extend. MuJoCo can be used by the ROS node for scene
-loading/visualization, while this module remains dependency-light and unit
-testable without ROS 2 or MuJoCo installed.
+The main simulation uses MuJoCo as its mechanical plant. This module remains
+dependency-light so the controller helpers and compatibility Python plant can
+be tested without ROS 2 or MuJoCo installed.
 """
 
 from __future__ import annotations
@@ -102,6 +101,8 @@ class PID:
         self.kd = kd
         self.integral_limit = abs(integral_limit)
         self.output_limit = abs(output_limit)
+        self.output_lower = -self.output_limit
+        self.output_upper = self.output_limit
         self.state = PIDState()
 
     def configure(
@@ -111,15 +112,31 @@ class PID:
         kd: float,
         integral_limit: float,
         output_limit: float,
+        output_lower: Optional[float] = None,
+        output_upper: Optional[float] = None,
     ) -> None:
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.integral_limit = abs(integral_limit)
         self.output_limit = abs(output_limit)
+        self.output_lower = (
+            -self.output_limit if output_lower is None else float(output_lower)
+        )
+        self.output_upper = (
+            self.output_limit if output_upper is None else float(output_upper)
+        )
+        if self.output_lower > self.output_upper:
+            self.output_lower, self.output_upper = self.output_upper, self.output_lower
 
     def reset(self) -> None:
         self.state = PIDState()
+
+    def set_output_bounds(self, lower: float, upper: float) -> None:
+        self.output_lower = float(lower)
+        self.output_upper = float(upper)
+        if self.output_lower > self.output_upper:
+            self.output_lower, self.output_upper = self.output_upper, self.output_lower
 
     def update(self, error: float, dt: float, derivative: Optional[float] = None) -> float:
         dt = max(dt, EPS)
@@ -141,7 +158,7 @@ class PID:
         raw_output = self.kp * error + self.ki * self.state.integral + self.kd * d_error
         output = raw_output
         if self.output_limit > 0.0:
-            output = clamp(raw_output, -self.output_limit, self.output_limit)
+            output = clamp(raw_output, self.output_lower, self.output_upper)
 
             # Back-calculate the clamped integrator so it cannot keep winding up
             # beyond the saturated command.
@@ -259,12 +276,17 @@ class TendonFingerPlant:
             max(0.0, self._p("safety.max_torque_nm", 0.35)),
             kt * current_limit,
         )
+        minimum_torque = clamp(
+            self._p("safety.min_torque_nm", 0.0),
+            -torque_limit,
+            torque_limit,
+        )
 
         if s.temperature >= self._p("safety.max_temperature_c", 85.0):
             delayed_command = 0.0
             events.append("temperature limit exceeded; torque disabled")
 
-        saturated_command = clamp(delayed_command, -torque_limit, torque_limit)
+        saturated_command = clamp(delayed_command, minimum_torque, torque_limit)
         if saturated_command != delayed_command:
             events.append("torque/current command saturated")
 
@@ -367,6 +389,16 @@ class TendonFingerPlant:
         if abs(s.finger_velocity) > max_velocity:
             s.finger_velocity = clamp(s.finger_velocity, -max_velocity, max_velocity)
             events.append("finger velocity clamped")
+
+        motor_lower = self._p("safety.min_motor_position_rad", 0.0)
+        if s.motor_position < motor_lower:
+            s.motor_position = motor_lower
+            s.motor_velocity = max(0.0, s.motor_velocity)
+            s.transmitted_spool_angle = motor_lower / gear_ratio
+            s.tendon_drive_angle = (
+                s.transmitted_spool_angle * spool_radius / tendon_moment_arm
+            )
+            events.append("motor lower position limit reached")
 
         lower = self._p("safety.min_position_rad", -0.05)
         upper = self._p("safety.max_position_rad", 1.35)
@@ -483,4 +515,3 @@ def merge_parameter_dicts(*dicts: Mapping[str, Any]) -> Dict[str, Any]:
             else:
                 merged[str(key)] = value
     return merged
-
